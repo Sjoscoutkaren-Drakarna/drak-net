@@ -1,0 +1,31 @@
+# Defaults for every app. Override per app in apps/<name>/values*.yaml.
+
+image:
+  repository: ""        # set by the workflow: ghcr.io/<owner>/<app>
+  tag: ""               # set by the workflow: commit SHA
+  pullPolicy: IfNotPresent
+
+# Secret "ghcr" must exist in the namespace (see README). Set to [] if the images are public.
+imagePullSecrets:
+  - name: ghcr
+
+replicas: 1
+containerPort: 8080
+probePath: /
+
+# Plain environment variables: { KEY: value }
+env: {}
+
+# Public hostname, e.g. home.murarvagen.se. Leave empty for internal-only apps.
+host: ""
+
+# Small defaults – the Pi 3 only has 1 GB RAM.
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# Pin to a node, e.g. { kubernetes.io/hostname: pi } or { has-usb: "true" }
+nodeSelector: {}

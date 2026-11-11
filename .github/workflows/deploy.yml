@@ -1,0 +1,137 @@
+name: deploy
+
+# Three ways in:
+#  - repository_dispatch "deploy" from an app repo: deploy one app/env/tag, then record the tag
+#  - push to main: redeploy apps whose config changed (using their recorded tags)
+#  - workflow_dispatch: redeploy every app with a recorded tag (e.g. after a cluster rebuild)
+on:
+  repository_dispatch:
+    types: [deploy]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-${{ github.event.client_payload.app || 'config' }}-${{ github.event.client_payload.env || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.plan.outputs.targets }}
+      platform: ${{ steps.plan.outputs.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          P_APP: ${{ github.event.client_payload.app }}
+          P_ENV: ${{ github.event.client_payload.env }}
+          P_TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          set -euo pipefail
+          platform=false
+
+          if [ "$EVENT" = "repository_dispatch" ]; then
+            # Validate everything that comes from outside before it gets near a shell or helm
+            [[ "$P_APP" =~ ^[a-z0-9][a-z0-9-]{0,52}$ ]] || { echo "::error::invalid app name '$P_APP'"; exit 1; }
+            [ -d "apps/$P_APP" ] || { echo "::error::apps/$P_APP does not exist in homelab - add its config first"; exit 1; }
+            [[ "$P_ENV" =~ ^(staging|prod)$ ]] || { echo "::error::invalid env '$P_ENV'"; exit 1; }
+            [[ "$P_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "::error::invalid tag '$P_TAG'"; exit 1; }
+            targets=$(jq -nc --arg a "$P_APP" --arg e "$P_ENV" --arg t "$P_TAG" '[{app:$a, env:$e, tag:$t}]')
+          else
+            all_apps=$(find apps -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+            if [ "$EVENT" = "workflow_dispatch" ] \
+               || [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null \
+               || ! git diff --quiet "$BEFORE" HEAD -- charts/ .github/workflows/; then
+              apps="$all_apps"; platform=true
+            else
+              changed=$(git diff --name-only "$BEFORE" HEAD -- apps/ | cut -d/ -f2 | sort -u)
+              apps=$(comm -12 <(echo "$all_apps") <(echo "$changed"))
+              git diff --quiet "$BEFORE" HEAD -- platform/ || platform=true
+            fi
+            # Only apps that have been deployed at least once (have a recorded tag) can be redeployed
+            targets=$(for a in $apps; do for e in staging prod; do
+                        if [ -f "apps/$a/tag-$e.yaml" ]; then
+                          jq -nc --arg a "$a" --arg e "$e" '{app:$a, env:$e, tag:""}'
+                        fi
+                      done; done | jq -sc '.')
+          fi
+
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "platform=$platform" >> "$GITHUB_OUTPUT"
+          echo "Targets: $targets  Platform: $platform"
+
+  platform:
+    needs: plan
+    if: needs.plan.outputs.platform == 'true'
+    runs-on: [self-hosted, homelab]
+    steps:
+      - uses: actions/checkout@v4
+      - run: kubectl apply -f platform/
+
+  deploy:
+    needs: [plan, platform]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.targets != '[]' && needs.platform.result != 'failure'
+    runs-on: [self-hosted, homelab]
+    environment: ${{ matrix.target.env }}
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.plan.outputs.targets) }}
+    env:
+      APP: ${{ matrix.target.app }}
+      NS: ${{ matrix.target.env }}
+      TAG: ${{ matrix.target.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: helm upgrade ${{ matrix.target.app }} (${{ matrix.target.env }})
+        run: |
+          set -euo pipefail
+          args=(-f "apps/$APP/values.yaml")
+          [ -f "apps/$APP/values-$NS.yaml" ] && args+=(-f "apps/$APP/values-$NS.yaml")
+          if [ -n "$TAG" ]; then
+            args+=(--set-string image.tag="$TAG")       # new version from an app repo
+          else
+            args+=(-f "apps/$APP/tag-$NS.yaml")        # redeploy the recorded version
+          fi
+          helm upgrade --install "$APP" charts/web-app \
+            --namespace "$NS" --create-namespace \
+            "${args[@]}" \
+            --atomic --wait --timeout 5m
+
+  record:
+    # After a successful deploy from an app repo, commit the tag so Git shows what runs where.
+    # Commits made with GITHUB_TOKEN don't trigger new workflow runs, so this doesn't loop.
+    needs: [plan, deploy]
+    if: github.event_name == 'repository_dispatch' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      APP: ${{ github.event.client_payload.app }}
+      ENV: ${{ github.event.client_payload.env }}
+      TAG: ${{ github.event.client_payload.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf 'image:\n  tag: "%s"\n' "$TAG" > "apps/$APP/tag-$ENV.yaml"
+          git add "apps/$APP/tag-$ENV.yaml"
+          git diff --cached --quiet && exit 0
+          git commit -m "deploy: $APP $ENV -> $TAG"
+          for i in 1 2 3 4 5; do
+            git push && exit 0
+            git pull --rebase origin main
+          done
+          exit 1

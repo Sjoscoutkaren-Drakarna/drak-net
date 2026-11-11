@@ -1,0 +1,7 @@
+# Shared by staging and prod for this app.
+# The image is built by the app's own repo (created from homelab-app-template).
+image:
+  repository: ghcr.io/your-org/homepage   # lowercase: ghcr.io/<org>/<app-repo-name>
+
+containerPort: 8080
+probePath: /
