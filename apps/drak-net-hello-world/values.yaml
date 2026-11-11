@@ -1,0 +1,6 @@
+# Copy this folder to the homelab repo as apps/<app-name>/
+image:
+  repository: ghcr.io/Sjoscoutkaren-Drakarna/drak-net-hello-world   # lowercase, same as this repo's name
+
+containerPort: 8080
+probePath: /
