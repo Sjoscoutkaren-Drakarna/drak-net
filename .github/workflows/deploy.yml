@@ -104,7 +104,7 @@ jobs:
           helm upgrade --install "$APP" charts/web-app \
             --namespace "$NS" --create-namespace \
             "${args[@]}" \
-            --atomic --wait --timeout 5m
+            --rollback-on-failure --wait --timeout 5m
 
   record:
     # After a successful deploy from an app repo, commit the tag so Git shows what runs where.
