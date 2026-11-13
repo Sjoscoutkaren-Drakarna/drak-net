@@ -91,6 +91,17 @@ jobs:
       TAG: ${{ matrix.target.tag }}
     steps:
       - uses: actions/checkout@v4
+      - name: Create GHCR image pull secret
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret docker-registry ghcr \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password="$GITHUB_TOKEN" \
+            --namespace="$NS" \
+            --dry-run=client -o yaml | kubectl apply -f -
       - name: helm upgrade ${{ matrix.target.app }} (${{ matrix.target.env }})
         run: |
           set -euo pipefail
